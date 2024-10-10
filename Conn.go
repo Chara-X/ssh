@@ -3,13 +3,13 @@ package ssh
 import (
 	"bufio"
 	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ecdh"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"net"
+	"time"
 
 	"github.com/Chara-X/ssh/msg"
 	"golang.org/x/crypto/ssh"
@@ -17,6 +17,8 @@ import (
 
 type Conn struct {
 	// chans *sync.Map
+	readCipher  *StreamPacketCipher
+	writeCipher *StreamPacketCipher
 	net.Conn
 	User          string
 	SessionID     []byte
@@ -30,50 +32,60 @@ func NewClientConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 	var scanner = bufio.NewScanner(c)
 	scanner.Scan()
 	c.ServerVersion = scanner.Text()
-	// Algorithm negotiation
-	var algosRes = &msg.KexAlgos{}
-	ssh.Unmarshal(c.ReadPacket(), algosRes)
-	var algosReq = &msg.KexAlgos{KexAlgos: []string{"ecdh-sha2-nistp256"}, ServerHostKeyAlgos: []string{"ecdsa-sha2-nistp256"}, CiphersClientServer: []string{"aes256-ctr"}, CiphersServerClient: []string{"aes256-ctr"}, MACsClientServer: []string{"hmac-sha2-256"}, MACsServerClient: []string{"hmac-sha2-256"}, CompressionClientServer: []string{"none"}, CompressionServerClient: []string{"none"}}
+	// Key algos
+	var algosRep = &msg.KexAlgos{}
+	c.ReadPacket(algosRep)
+	var algosReq = &msg.KexAlgos{KexAlgos: config.KeyExchanges, ServerHostKeyAlgos: config.HostKeyAlgorithms, CiphersClientServer: config.Ciphers, CiphersServerClient: config.Ciphers, MACsClientServer: config.MACs, MACsServerClient: config.MACs, CompressionClientServer: []string{"none"}, CompressionServerClient: []string{"none"}}
 	rand.Read(algosReq.Cookie[:])
-	c.WritePacket(ssh.Marshal(algosReq))
+	c.WritePacket(algosReq)
 	// Key exchange
 	var ecdhKey, _ = ecdh.P256().GenerateKey(rand.Reader)
 	var ecdhReq = &msg.KexRequest{PubKey: ecdhKey.PublicKey().Bytes()}
-	c.WritePacket(ssh.Marshal(ecdhReq))
-	var ecdhRes = &msg.KexReply{}
-	var p2 = c.ReadPacket()
-	ssh.Unmarshal(p2, ecdhRes)
-	var pubKey, _ = ecdh.P256().NewPublicKey(ecdhRes.PubKey)
+	c.WritePacket(ecdhReq)
+	var ecdhRep = &msg.KexReply{}
+	c.ReadPacket(ecdhRep)
+	var pubKey, _ = ecdh.P256().NewPublicKey(ecdhRep.PubKey)
 	var secret, _ = ecdhKey.ECDH(pubKey)
 	var sha = sha256.New()
+	sha.Write([]byte(c.ClientVersion))
+	sha.Write([]byte(c.ServerVersion))
+	sha.Write(ssh.Marshal(algosReq))
+	sha.Write(ssh.Marshal(algosRep))
+	sha.Write(ecdhRep.HostKey)
+	sha.Write(ecdhReq.PubKey)
+	sha.Write(ecdhRep.PubKey)
 	sha.Write(secret)
 	c.SessionID = sha.Sum(nil)
-	var iv = make([]byte, aes.BlockSize)
-	var key = make([]byte, 32)
-	var macKey = make([]byte, 32)
-	generateKey(secret, c.SessionID, 'A', iv)
-	generateKey(secret, c.SessionID, 'C', key)
-	generateKey(secret, c.SessionID, 'E', macKey)
-	var block, _ = aes.NewCipher(key)
-	var stream = cipher.NewCTR(block, iv)
-	var streamDump []byte
-	for remainingToDump := 0; remainingToDump > 0; {
-		dumpThisTime := remainingToDump
-		if dumpThisTime > len(streamDump) {
-			dumpThisTime = len(streamDump)
-		}
-		stream.XORKeyStream(streamDump[:dumpThisTime], streamDump[:dumpThisTime])
-		remainingToDump -= dumpThisTime
-	}
-	var mac = hmac.New(sha256.New, macKey)
-	_ = &StreamPacketCipher{
-		mac:       mac,
-		macResult: make([]byte, mac.Size()),
-		cipher:    stream,
+	// Key derivation
+	c.readCipher = NewStreamPacketCipher(secret, c.SessionID, "BDF")
+	c.writeCipher = NewStreamPacketCipher(secret, c.SessionID, "ACE")
+	// New keys
+	var newKeysRep = &msg.Msg{}
+	c.ReadPacket(newKeysRep)
+	c.WritePacket(&msg.Msg{SSHType: 21})
+	for {
+		fmt.Println("Session:")
+		// var channelOpenReq = &msg.ChannelOpen{
+		// 	ChanType:      "session",
+		// 	PeersID:       0,
+		// 	PeersWindow:   1024 * 100,
+		// 	MaxPacketSize: 1024 * 100,
+		// }
+		// c.WriteCipherPacket(channelOpenReq)
+		var channelOpenRep = &msg.Msg{}
+		c.ReadCipherPacket(channelOpenRep)
+		fmt.Println(channelOpenRep.SSHType)
+		time.Sleep(time.Second)
 	}
 	return c
 }
-func (c *Conn) ReadPacket() []byte {
+func (c *Conn) ReadCipherPacket(msg interface{}) error {
+	return c.readCipher.ReadCipherPacket(c, msg)
+}
+func (c *Conn) WriteCipherPacket(msg interface{}) error {
+	return c.writeCipher.WriteCipherPacket(c, msg)
+}
+func (c *Conn) ReadPacket(msg interface{}) {
 	var length = make([]byte, 4)
 	c.Read(length)
 	var paddingLength = make([]byte, 1)
@@ -81,12 +93,13 @@ func (c *Conn) ReadPacket() []byte {
 	var bodyLength = binary.BigEndian.Uint32(length) - 1
 	var body = make([]byte, bodyLength)
 	c.Read(body)
-	return body[:int(bodyLength)-int(paddingLength[0])]
+	ssh.Unmarshal(body[:int(bodyLength)-int(paddingLength[0])], msg)
 }
-func (c *Conn) WritePacket(payload []byte) {
-	var paddingLength = blockSize - (5+len(payload))%blockSize
+func (c *Conn) WritePacket(msg interface{}) {
+	var payload = ssh.Marshal(msg)
+	var paddingLength = aes.BlockSize - (5+len(payload))%aes.BlockSize
 	if paddingLength < 4 {
-		paddingLength += blockSize
+		paddingLength += aes.BlockSize
 	}
 	var length = 1 + len(payload) + int(paddingLength)
 	binary.Write(c, binary.BigEndian, uint32(length))
@@ -96,33 +109,6 @@ func (c *Conn) WritePacket(payload []byte) {
 	rand.Read(padding)
 	c.Write(padding)
 }
-func generateKey(k, h []byte, c byte, out []byte) {
-	var digestsSoFar []byte
-	var sha = sha256.New()
-	for len(out) > 0 {
-		sha.Write(k)
-		sha.Write(h)
-		if len(digestsSoFar) == 0 {
-			sha.Write([]byte{c})
-			sha.Write(h)
-		} else {
-			sha.Write(digestsSoFar)
-		}
-		var digest = sha.Sum(nil)
-		var n = copy(out, digest)
-		out = out[n:]
-		if len(out) > 0 {
-			digestsSoFar = append(digestsSoFar, digest...)
-		}
-	}
-}
-
-// func (c *Conn) readCipherPacket() []byte {
-// 	panic("not implemented")
-// }
-// func (c *Conn) writeCipherPacket(packet []byte) {
-// 	panic("not implemented")
-// }
 
 //	func (c *Conn) OpenChannel(name string, payload []byte) *Channel {
 //		var ch = &Channel{chanType: name, conn: c}
@@ -139,7 +125,6 @@ func generateKey(k, h []byte, c byte, out []byte) {
 //		c.writePacket(packet.Bytes())
 //		return ch
 //	}
-
 // go func() {
 // 	for {
 // 		var packet = c.ReadPacket()

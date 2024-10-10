@@ -1,95 +1,110 @@
 package ssh
 
 import (
+	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"hash"
 	"io"
-)
 
-const (
-	prefixLen = 5
-	blockSize = 16
+	"golang.org/x/crypto/ssh"
 )
 
 type StreamPacketCipher struct {
-	cipher      cipher.Stream
-	prefix      [prefixLen]byte
-	seqNumBytes [4]byte
-	packetData  []byte
-	mac         hash.Hash
-	macResult   []byte
+	cipher cipher.Stream
+	mac    hash.Hash
+	seqNum uint32
 }
 
-func (s *StreamPacketCipher) ReadCipherPacket(seqNum uint32, r io.Reader) ([]byte, error) {
-	if _, err := io.ReadFull(r, s.prefix[:]); err != nil {
-		return nil, err
+func NewStreamPacketCipher(secret, sessionID []byte, dir string) *StreamPacketCipher {
+	var iv, key, macKey = make([]byte, aes.BlockSize), make([]byte, 32), make([]byte, 32)
+	generateKey(secret, sessionID, dir[0], iv)
+	generateKey(secret, sessionID, dir[1], key)
+	generateKey(secret, sessionID, dir[2], macKey)
+	var block, _ = aes.NewCipher(key)
+	return &StreamPacketCipher{
+		cipher: cipher.NewCTR(block, iv),
+		mac:    hmac.New(sha256.New, macKey),
 	}
-	s.cipher.XORKeyStream(s.prefix[:], s.prefix[:])
-	length := binary.BigEndian.Uint32(s.prefix[0:4])
-	paddingLength := uint32(s.prefix[4])
-	var macSize uint32
-	if s.mac != nil {
-		s.mac.Reset()
-		binary.BigEndian.PutUint32(s.seqNumBytes[:], seqNum)
-		s.mac.Write(s.seqNumBytes[:])
-		s.mac.Write(s.prefix[:])
-		macSize = uint32(s.mac.Size())
-	}
-	if uint32(cap(s.packetData)) < length-1+macSize {
-		s.packetData = make([]byte, length-1+macSize)
-	} else {
-		s.packetData = s.packetData[:length-1+macSize]
-	}
-	if _, err := io.ReadFull(r, s.packetData); err != nil {
-		return nil, err
-	}
-	mac := s.packetData[length-1:]
-	data := s.packetData[:length-1]
-	s.cipher.XORKeyStream(data, data)
-	if s.mac != nil {
-		s.mac.Write(data)
-		s.macResult = s.mac.Sum(s.macResult[:0])
-		if subtle.ConstantTimeCompare(s.macResult, mac) != 1 {
-			return nil, errors.New("ssh: MAC failure")
-		}
-	}
-	return s.packetData[:length-paddingLength-1], nil
 }
-func (s *StreamPacketCipher) WriteCipherPacket(seqNum uint32, w io.Writer, rand io.Reader, packet []byte) error {
-	aadlen := 0
-	paddingLength := blockSize - (prefixLen+len(packet)-aadlen)%blockSize
+func (s *StreamPacketCipher) ReadCipherPacket(r io.Reader, msg interface{}) error {
+	var header = make([]byte, 5)
+	r.Read(header)
+	s.cipher.XORKeyStream(header, header)
+	var length = binary.BigEndian.Uint32(header[:4])
+	fmt.Println("length:", length)
+	var paddingLength = uint32(header[4])
+	fmt.Println("paddingLength:", paddingLength)
+	var body = make([]byte, length-1)
+	r.Read(body)
+	s.cipher.XORKeyStream(body, body)
+	fmt.Println("body:", body)
+	var mac = make([]byte, 32)
+	r.Read(mac)
+	fmt.Println("mac:", mac)
+	s.mac.Reset()
+	binary.Write(s.mac, binary.BigEndian, s.seqNum)
+	s.mac.Write(header)
+	s.mac.Write(body)
+	if subtle.ConstantTimeCompare(s.mac.Sum(nil), mac) == 0 {
+		panic("ssh: MAC failure")
+	}
+	ssh.Unmarshal(body[:length-1-paddingLength], msg)
+	s.seqNum++
+	return nil
+}
+func (s *StreamPacketCipher) WriteCipherPacket(w io.Writer, msg interface{}) error {
+	var payload = ssh.Marshal(msg)
+	var paddingLength = aes.BlockSize - (5+len(payload))%aes.BlockSize
 	if paddingLength < 4 {
-		paddingLength += blockSize
+		paddingLength += aes.BlockSize
 	}
-	length := len(packet) + 1 + paddingLength
-	binary.BigEndian.PutUint32(s.prefix[:], uint32(length))
-	s.prefix[4] = byte(paddingLength)
+	var length = 1 + len(payload) + paddingLength
+	var header = make([]byte, 5)
+	binary.BigEndian.PutUint32(header[:4], uint32(length))
+	header[4] = byte(paddingLength)
 	var padding = make([]byte, paddingLength)
-	if _, err := io.ReadFull(rand, padding); err != nil {
-		return err
-	}
-	if s.mac != nil {
-		s.mac.Reset()
-		binary.BigEndian.PutUint32(s.seqNumBytes[:], seqNum)
-		s.mac.Write(s.seqNumBytes[:])
-		s.mac.Write(s.prefix[:])
-		s.mac.Write(packet)
-		s.mac.Write(padding)
-	}
-	s.cipher.XORKeyStream(s.prefix[:], s.prefix[:])
-	s.cipher.XORKeyStream(packet, packet)
+	rand.Reader.Read(padding)
+	s.mac.Reset()
+	var seqNumBytes = make([]byte, 4)
+	binary.BigEndian.PutUint32(seqNumBytes, s.seqNum)
+	s.mac.Write(seqNumBytes)
+	s.mac.Write(header)
+	s.mac.Write(payload)
+	s.mac.Write(padding)
+	var mac = s.mac.Sum(nil)
+	s.cipher.XORKeyStream(header, header)
+	s.cipher.XORKeyStream(payload, payload)
 	s.cipher.XORKeyStream(padding, padding)
-	w.Write(s.prefix[:])
-	w.Write(packet)
+	w.Write(header)
+	w.Write(payload)
 	w.Write(padding)
-	if s.mac != nil {
-		s.macResult = s.mac.Sum(s.macResult[:0])
-		if _, err := w.Write(s.macResult); err != nil {
-			return err
+	w.Write(mac)
+	s.seqNum++
+	return nil
+}
+func generateKey(k, h []byte, d byte, out []byte) {
+	var keySoFar []byte
+	var sha = sha256.New()
+	for len(out) > 0 {
+		sha.Write(k)
+		sha.Write(h)
+		if len(keySoFar) == 0 {
+			sha.Write([]byte{d})
+			sha.Write(h)
+		} else {
+			sha.Write(keySoFar)
+		}
+		var digest = sha.Sum(nil)
+		var n = copy(out, digest)
+		out = out[n:]
+		if len(out) > 0 {
+			keySoFar = append(keySoFar, digest...)
 		}
 	}
-	return nil
 }
