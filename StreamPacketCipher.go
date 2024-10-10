@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	prefixLen          = 5
-	packetSizeMultiple = 16
-	maxPacket          = 256 * 1024
+	prefixLen = 5
+	blockSize = 16
 )
 
 type StreamPacketCipher struct {
@@ -61,9 +60,9 @@ func (s *StreamPacketCipher) ReadCipherPacket(seqNum uint32, r io.Reader) ([]byt
 }
 func (s *StreamPacketCipher) WriteCipherPacket(seqNum uint32, w io.Writer, rand io.Reader, packet []byte) error {
 	aadlen := 0
-	paddingLength := packetSizeMultiple - (prefixLen+len(packet)-aadlen)%packetSizeMultiple
+	paddingLength := blockSize - (prefixLen+len(packet)-aadlen)%blockSize
 	if paddingLength < 4 {
-		paddingLength += packetSizeMultiple
+		paddingLength += blockSize
 	}
 	length := len(packet) + 1 + paddingLength
 	binary.BigEndian.PutUint32(s.prefix[:], uint32(length))
