@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 
@@ -32,7 +33,10 @@ func (kex *ECDH) Client(c *Conn, rand io.Reader, magics *handshakeMagics) (*kexR
 	}
 	secret, _ := kex.curve.ScalarMult(x, y, ephKey.D.Bytes())
 	h := ecHash(kex.curve).New()
-	magics.write(h)
+	writeString(h, magics.clientVersion)
+	writeString(h, magics.serverVersion)
+	writeString(h, magics.clientKexInit)
+	writeString(h, magics.serverKexInit)
 	writeString(h, reply.HostKey)
 	writeString(h, kexInit.PubKey)
 	writeString(h, reply.PubKey)
@@ -121,14 +125,6 @@ type handshakeMagics struct {
 	clientVersion, serverVersion []byte
 	clientKexInit, serverKexInit []byte
 }
-
-func (m *handshakeMagics) write(w io.Writer) {
-	writeString(w, m.clientVersion)
-	writeString(w, m.serverVersion)
-	writeString(w, m.clientKexInit)
-	writeString(w, m.serverKexInit)
-}
-
 type kexResult struct {
 	H         []byte
 	K         []byte
@@ -165,6 +161,7 @@ func validateECPublicKey(curve elliptic.Curve, x, y *big.Int) bool {
 }
 func ecHash(curve elliptic.Curve) crypto.Hash {
 	bitSize := curve.Params().BitSize
+	fmt.Println(bitSize)
 	switch {
 	case bitSize <= 256:
 		return crypto.SHA256

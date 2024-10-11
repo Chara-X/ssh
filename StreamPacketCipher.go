@@ -18,12 +18,6 @@ const packetSizeMultiple = 16
 const maxPacket = 256 * 1024
 const msgDisconnect = 1
 
-type disconnectMsg struct {
-	Reason   uint32 `sshtype:"1"`
-	Message  string
-	Language string
-}
-
 // StreamPacketCipher is a packetCipher using a stream cipher.
 type StreamPacketCipher struct {
 	mac    hash.Hash
@@ -37,13 +31,15 @@ type StreamPacketCipher struct {
 	macResult   []byte
 }
 
-func NewStreamPacketCipher(dir string, kex *kexResult) *StreamPacketCipher {
+func NewStreamPacketCipher(dir direction, kex *kexResult) *StreamPacketCipher {
 	var iv, key, macKey = make([]byte, aes.BlockSize), make([]byte, 32), make([]byte, 32)
-	generateKeyMaterial(iv, []byte{dir[0]}, kex)
-	generateKeyMaterial(key, []byte{dir[1]}, kex)
-	generateKeyMaterial(macKey, []byte{dir[2]}, kex)
+	generateKeyMaterial(iv, dir.ivTag, kex)
+	generateKeyMaterial(key, dir.keyTag, kex)
+	generateKeyMaterial(macKey, dir.macKeyTag, kex)
 	var block, err = aes.NewCipher(key)
-	fmt.Println(err)
+	if err != nil {
+		panic(err)
+	}
 	return &StreamPacketCipher{
 		cipher:    cipher.NewCTR(block, iv),
 		mac:       hmac.New(sha256.New, macKey),
@@ -120,12 +116,7 @@ func (s *StreamPacketCipher) writeCipherPacket(seqNum uint32, w io.Writer, rand 
 	if len(packet) > maxPacket {
 		return errors.New("ssh: packet too large")
 	}
-	aadlen := 0
-	if s.mac != nil && s.etm {
-		// packet length is not encrypted for EtM modes
-		aadlen = 4
-	}
-	paddingLength := packetSizeMultiple - (prefixLen+len(packet)-aadlen)%packetSizeMultiple
+	paddingLength := packetSizeMultiple - (prefixLen+len(packet))%packetSizeMultiple
 	if paddingLength < 4 {
 		paddingLength += packetSizeMultiple
 	}
@@ -181,77 +172,22 @@ func (s *StreamPacketCipher) writeCipherPacket(seqNum uint32, w io.Writer, rand 
 	}
 	return nil
 }
-
-//	func (s *StreamPacketCipher) ReadCipherPacket(r io.Reader, msg interface{}) error {
-//		var header = make([]byte, 5)
-//		r.Read(header)
-//		s.cipher.XORKeyStream(header, header)
-//		var length = binary.BigEndian.Uint32(header[:4])
-//		fmt.Println("length:", length)
-//		var paddingLength = uint32(header[4])
-//		fmt.Println("paddingLength:", paddingLength)
-//		var body = make([]byte, length-1)
-//		r.Read(body)
-//		s.cipher.XORKeyStream(body, body)
-//		fmt.Println("body:", body)
-//		var mac = make([]byte, 32)
-//		r.Read(mac)
-//		fmt.Println("mac:", mac)
-//		s.mac.Reset()
-//		binary.Write(s.mac, binary.BigEndian, s.seqNum)
-//		s.mac.Write(header)
-//		s.mac.Write(body)
-//		if subtle.ConstantTimeCompare(s.mac.Sum(nil), mac) == 0 {
-//			panic("ssh: MAC failure")
-//		}
-//		ssh.Unmarshal(body[:length-1-paddingLength], msg)
-//		s.seqNum++
-//		return nil
-//	}
-//
-//	func (s *StreamPacketCipher) WriteCipherPacket(w io.Writer, msg interface{}) error {
-//		var payload = ssh.Marshal(msg)
-//		var paddingLength = aes.BlockSize - (5+len(payload))%aes.BlockSize
-//		if paddingLength < 4 {
-//			paddingLength += aes.BlockSize
-//		}
-//		var length = 1 + len(payload) + paddingLength
-//		var header = make([]byte, 5)
-//		binary.BigEndian.PutUint32(header[:4], uint32(length))
-//		header[4] = byte(paddingLength)
-//		var padding = make([]byte, paddingLength)
-//		rand.Reader.Read(padding)
-//		s.mac.Reset()
-//		var seqNumBytes = make([]byte, 4)
-//		binary.BigEndian.PutUint32(seqNumBytes, s.seqNum)
-//		s.mac.Write(seqNumBytes)
-//		s.mac.Write(header)
-//		s.mac.Write(payload)
-//		s.mac.Write(padding)
-//		var mac = s.mac.Sum(nil)
-//		s.cipher.XORKeyStream(header, header)
-//		s.cipher.XORKeyStream(payload, payload)
-//		s.cipher.XORKeyStream(padding, padding)
-//		w.Write(header)
-//		w.Write(payload)
-//		w.Write(padding)
-//		w.Write(mac)
-//		s.seqNum++
-//		return nil
-//	}
 func generateKeyMaterial(out, tag []byte, r *kexResult) {
 	var digestsSoFar []byte
+
 	h := r.Hash.New()
 	for len(out) > 0 {
 		h.Reset()
 		h.Write(r.K)
 		h.Write(r.H)
+
 		if len(digestsSoFar) == 0 {
 			h.Write(tag)
 			h.Write(r.SessionID)
 		} else {
 			h.Write(digestsSoFar)
 		}
+
 		digest := h.Sum(nil)
 		n := copy(out, digest)
 		out = out[n:]
