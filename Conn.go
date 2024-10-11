@@ -3,10 +3,10 @@ package ssh
 import (
 	"bufio"
 	"crypto/aes"
-	"crypto/ecdh"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -17,6 +17,8 @@ import (
 
 type Conn struct {
 	// chans *sync.Map
+	rSeqNum     uint32
+	wSeqNum     uint32
 	readCipher  *StreamPacketCipher
 	writeCipher *StreamPacketCipher
 	net.Conn
@@ -26,7 +28,7 @@ type Conn struct {
 	ServerVersion string
 }
 
-func NewClientConn(conn net.Conn, config *ssh.ClientConfig) Conn {
+func NewConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 	var c = Conn{Conn: conn, User: config.User, ClientVersion: "SSH-2.0-Go"}
 	c.Write([]byte(c.ClientVersion + "\r\n"))
 	var scanner = bufio.NewScanner(c)
@@ -39,26 +41,17 @@ func NewClientConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 	rand.Read(algosReq.Cookie[:])
 	c.WritePacket(algosReq)
 	// Key exchange
-	var ecdhKey, _ = ecdh.P256().GenerateKey(rand.Reader)
-	var ecdhReq = &msg.KexRequest{PubKey: ecdhKey.PublicKey().Bytes()}
-	c.WritePacket(ecdhReq)
-	var ecdhRep = &msg.KexReply{}
-	c.ReadPacket(ecdhRep)
-	var pubKey, _ = ecdh.P256().NewPublicKey(ecdhRep.PubKey)
-	var secret, _ = ecdhKey.ECDH(pubKey)
-	var sha = sha256.New()
-	sha.Write([]byte(c.ClientVersion))
-	sha.Write([]byte(c.ServerVersion))
-	sha.Write(ssh.Marshal(algosReq))
-	sha.Write(ssh.Marshal(algosRep))
-	sha.Write(ecdhRep.HostKey)
-	sha.Write(ecdhReq.PubKey)
-	sha.Write(ecdhRep.PubKey)
-	sha.Write(secret)
-	c.SessionID = sha.Sum(nil)
+	var ecdhAlg = &ECDH{curve: elliptic.P256()}
+	var kexResult, _ = ecdhAlg.Client(&c, rand.Reader, &handshakeMagics{clientVersion: []byte(c.ClientVersion), serverVersion: []byte(c.ServerVersion), clientKexInit: ssh.Marshal(algosReq), serverKexInit: ssh.Marshal(algosRep)})
+	c.SessionID = kexResult.H
+	// Verify host key
+	var hostKey, _ = ssh.ParsePublicKey(kexResult.HostKey)
+	var sig = &ssh.Signature{}
+	ssh.Unmarshal(kexResult.Signature, sig)
+	fmt.Println("Host key verify:", hostKey.Verify(kexResult.H, sig))
 	// Key derivation
-	c.readCipher = NewStreamPacketCipher(secret, c.SessionID, "BDF")
-	c.writeCipher = NewStreamPacketCipher(secret, c.SessionID, "ACE")
+	c.readCipher = NewStreamPacketCipher("BDF", kexResult)
+	c.writeCipher = NewStreamPacketCipher("ACE", kexResult)
 	// New keys
 	var newKeysRep = &msg.Msg{}
 	c.ReadPacket(newKeysRep)
@@ -71,19 +64,47 @@ func NewClientConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 		// 	PeersWindow:   1024 * 100,
 		// 	MaxPacketSize: 1024 * 100,
 		// }
-		// c.WriteCipherPacket(channelOpenReq)
+		// if err := c.WriteCipherPacket(channelOpenReq); err != nil {
+		// 	panic(err)
+		// }
 		var channelOpenRep = &msg.Msg{}
-		c.ReadCipherPacket(channelOpenRep)
+		if err := c.ReadCipherPacket(channelOpenRep); err != nil {
+			panic(err)
+		}
 		fmt.Println(channelOpenRep.SSHType)
 		time.Sleep(time.Second)
 	}
 	return c
 }
 func (c *Conn) ReadCipherPacket(msg interface{}) error {
-	return c.readCipher.ReadCipherPacket(c, msg)
+	packet, err := c.readCipher.readCipherPacket(c.rSeqNum, c)
+	c.rSeqNum++
+	if err == nil && len(packet) == 0 {
+		panic(errors.New("ssh: zero length packet"))
+	}
+	if len(packet) > 0 {
+		switch packet[0] {
+		case msgDisconnect:
+			panic("ssh: got disconnect message")
+		}
+	}
+	// The packet may point to an internal buffer, so copy the
+	// packet out here.
+	fresh := make([]byte, len(packet))
+	copy(fresh, packet)
+	if err := ssh.Unmarshal(fresh, msg); err != nil {
+		panic(err)
+	}
+	return nil
 }
 func (c *Conn) WriteCipherPacket(msg interface{}) error {
-	return c.writeCipher.WriteCipherPacket(c, msg)
+	var packet = ssh.Marshal(msg)
+	err := c.writeCipher.writeCipherPacket(c.wSeqNum, c, rand.Reader, packet)
+	if err != nil {
+		panic(err)
+	}
+	c.wSeqNum++
+	return err
 }
 func (c *Conn) ReadPacket(msg interface{}) {
 	var length = make([]byte, 4)
@@ -137,3 +158,21 @@ func (c *Conn) WritePacket(msg interface{}) {
 // 		}
 // 	}
 // }()
+// Key exchange
+// var ecdhKey, _ = ecdh.P256().GenerateKey(rand.Reader)
+// var ecdhReq = &msg.KexRequest{PubKey: ecdhKey.PublicKey().Bytes()}
+// c.WritePacket(ecdhReq)
+// var ecdhRep = &msg.KexReply{}
+// c.ReadPacket(ecdhRep)
+// var pubKey, _ = ecdh.P256().NewPublicKey(ecdhRep.PubKey)
+// var secret, _ = ecdhKey.ECDH(pubKey)
+// var sha = sha256.New()
+// writeString(sha, []byte(c.ClientVersion))
+// writeString(sha, []byte(c.ServerVersion))
+// writeString(sha, ssh.Marshal(algosReq))
+// writeString(sha, ssh.Marshal(algosRep))
+// writeString(sha, ecdhRep.HostKey)
+// writeString(sha, ecdhReq.PubKey)
+// writeString(sha, ecdhRep.PubKey)
+// sha.Write(secret)
+// c.SessionID = sha.Sum(nil)
