@@ -7,14 +7,16 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	random "math/rand"
 	"net"
+	"sync"
 
 	"github.com/Chara-X/ssh/msg"
 	"golang.org/x/crypto/ssh"
 )
 
 type Conn struct {
-	// chans *sync.Map
+	chans       *sync.Map
 	bufReader   *bufio.Reader
 	bufWriter   *bufio.Writer
 	readCipher  *connectionState
@@ -26,8 +28,8 @@ type Conn struct {
 	ServerVersion string
 }
 
-func NewConn(conn net.Conn, config *ssh.ClientConfig) Conn {
-	var c = Conn{Conn: conn, User: config.User, ClientVersion: "SSH-2.0-Go"}
+func NewConn(conn net.Conn, config *ssh.ClientConfig) *Conn {
+	var c = &Conn{Conn: conn, User: config.User, ClientVersion: "SSH-2.0-Go"}
 	c.Write([]byte(c.ClientVersion + "\r\n"))
 	var scanner = bufio.NewScanner(c)
 	scanner.Scan()
@@ -40,7 +42,7 @@ func NewConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 	c.ReadPacket(algosRep)
 	// Key exchange
 	var ecdhAlg = &ECDH{curve: elliptic.P256()}
-	var kexRes, _ = ecdhAlg.Client(&c, rand.Reader, &handshakeMagics{clientVersion: []byte(c.ClientVersion), serverVersion: []byte(c.ServerVersion), clientKexInit: ssh.Marshal(algosReq), serverKexInit: ssh.Marshal(algosRep)})
+	var kexRes, _ = ecdhAlg.Client(c, rand.Reader, &handshakeMagics{clientVersion: []byte(c.ClientVersion), serverVersion: []byte(c.ServerVersion), clientKexInit: ssh.Marshal(algosReq), serverKexInit: ssh.Marshal(algosRep)})
 	c.SessionID = kexRes.H
 	kexRes.SessionID = c.SessionID
 	// Verify host key
@@ -63,10 +65,10 @@ func NewConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 	// c.readCipher.pendingKeyChange <- NewStreamPacketCipher(direction{[]byte{'B'}, []byte{'D'}, []byte{'F'}}, kexRes)
 	// c.writeCipher.pendingKeyChange <- NewStreamPacketCipher(direction{[]byte{'A'}, []byte{'C'}, []byte{'E'}}, kexRes)
 	// Client authentication
-	if err := c.WriteCipherPacket(&serviceRequestMsg{Service: "ssh-userauth"}); err != nil {
+	if err := c.WriteCipherPacket(&msg.ServiceRequest{Service: "ssh-userauth"}); err != nil {
 		panic(err)
 	}
-	var serviceAccept = &serviceAcceptMsg{}
+	var serviceAccept = &msg.ServiceAccept{}
 	if err := c.ReadCipherPacket(serviceAccept); err != nil {
 		panic(err)
 	}
@@ -76,9 +78,16 @@ func NewConn(conn net.Conn, config *ssh.ClientConfig) Conn {
 		Method:   "password",
 		Password: "123",
 	})
-	var userAuthSuccess = &msg.Msg{}
-	if err := c.ReadCipherPacket(userAuthSuccess); err != nil || userAuthSuccess.SSHType != 52 {
-		panic("User auth failed")
+	var userAuthBanner = &msg.UserAuthBanner{}
+	if err := c.ReadCipherPacket(userAuthBanner); err != nil {
+		panic(err)
+	}
+	fmt.Println(userAuthBanner.Message)
+	var authRes = &msg.Msg{}
+	if err := c.ReadCipherPacket(authRes); err != nil || authRes.SSHType != 52 {
+		panic(fmt.Sprintln("User auth failed"))
+	} else {
+		fmt.Println("User auth success")
 	}
 	return c
 }
@@ -118,29 +127,24 @@ func (c *Conn) WritePacket(msg interface{}) {
 	rand.Read(padding)
 	c.Write(padding)
 }
-
-type serviceRequestMsg struct {
-	Service string `sshtype:"5"`
+func (c *Conn) OpenChannel(name string, payload []byte) *Channel {
+	var ch = &Channel{chanType: name, conn: c}
+	ch.id = random.Uint32()
+	c.chans.Store(ch.id, ch)
+	c.WriteCipherPacket(&msg.ChannelOpen{
+		ChanType:         name,
+		PeersWindow:      1024 * 10,
+		MaxPacketSize:    1024 * 10,
+		TypeSpecificData: payload,
+		PeersID:          ch.id,
+	})
+	var confirm = &msg.ChannelOpenConfirm{}
+	if err := c.ReadCipherPacket(confirm); err != nil {
+		panic(err)
+	}
+	return ch
 }
-type serviceAcceptMsg struct {
-	Service string `sshtype:"6"`
-}
 
-//	func (c *Conn) OpenChannel(name string, payload []byte) *Channel {
-//		var ch = &Channel{chanType: name, conn: c}
-//		ch.id = rand.Uint32()
-//		c.chans.Store(ch.id, ch)
-//		var packet = bytes.NewBuffer([]byte{MsgChannelOpen})
-//		binary.Write(packet, binary.BigEndian, uint32(len(name)))
-//		packet.WriteString(name)
-//		binary.Write(packet, binary.BigEndian, ch.id)
-//		binary.Write(packet, binary.BigEndian, uint32(1024*100))
-//		binary.Write(packet, binary.BigEndian, uint32(1024*100))
-//		binary.Write(packet, binary.BigEndian, uint32(len(payload)))
-//		packet.Write(payload)
-//		c.writePacket(packet.Bytes())
-//		return ch
-//	}
 // go func() {
 // 	for {
 // 		var packet = c.ReadPacket()
