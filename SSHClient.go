@@ -1,4 +1,4 @@
-package ssh
+package tunnel
 
 import (
 	"bytes"
@@ -10,14 +10,14 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type SSHClient struct {
+type Client struct {
 	ssh.Conn
 	lns sync.Map
 }
 
-func NewSSHClient(addr string, cfg *ssh.ClientConfig) *SSHClient {
+func NewClient(addr string, cfg *ssh.ClientConfig) *Client {
 	var conn, _ = net.Dial("tcp", addr)
-	var cli, ln = &SSHClient{}, make(<-chan ssh.NewChannel)
+	var cli, ln = &Client{}, make(<-chan ssh.NewChannel)
 	cli.Conn, ln, _, _ = ssh.NewClientConn(conn, addr, cfg)
 	go func() {
 		for ch := range ln {
@@ -38,7 +38,7 @@ func NewSSHClient(addr string, cfg *ssh.ClientConfig) *SSHClient {
 	}()
 	return cli
 }
-func (c *SSHClient) Shell() ssh.Channel {
+func (c *Client) Shell() ssh.Channel {
 	var ch, reqs, _ = c.OpenChannel("session", nil)
 	ch.SendRequest("shell", false, nil)
 	go func() {
@@ -50,7 +50,7 @@ func (c *SSHClient) Shell() ssh.Channel {
 	}()
 	return ch
 }
-func (c *SSHClient) Dial(addr string) ssh.Channel {
+func (c *Client) Dial(addr string) ssh.Channel {
 	var payload = bytes.NewBuffer(nil)
 	var host, portString, _ = net.SplitHostPort(addr)
 	var rAddr = net.ParseIP(host).To4().String()
@@ -64,7 +64,7 @@ func (c *SSHClient) Dial(addr string) ssh.Channel {
 	var ch, _, _ = c.OpenChannel("direct-tcpip", payload.Bytes())
 	return ch
 }
-func (c *SSHClient) Listen(addr string) <-chan ssh.Channel {
+func (c *Client) Listen(addr string) <-chan ssh.Channel {
 	var payload = bytes.NewBuffer(nil)
 	var host, portString, _ = net.SplitHostPort(addr)
 	var port, _ = strconv.Atoi(portString)

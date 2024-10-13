@@ -1,4 +1,4 @@
-package ssh
+package tunnel
 
 import (
 	"bytes"
@@ -19,7 +19,7 @@ func (s *Server) ListenAndServe(addr string) {
 	var ln, _ = net.Listen("tcp", addr)
 	for {
 		var conn, _ = ln.Accept()
-		var cli = &SSHClient{}
+		var cli = &Client{}
 		var chs = make(<-chan ssh.NewChannel)
 		var reqs = make(<-chan *ssh.Request)
 		cli.Conn, chs, reqs, _ = ssh.NewServerConn(conn, s.cfg)

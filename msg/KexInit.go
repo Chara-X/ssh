@@ -1,6 +1,6 @@
 package msg
 
-type KexAlgos struct {
+type KexInit struct {
 	Cookie                  [16]byte `sshtype:"20"`
 	KexAlgos                []string
 	ServerHostKeyAlgos      []string

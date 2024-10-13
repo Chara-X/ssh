@@ -1,4 +1,4 @@
-package ssh
+package tunnel
 
 import "golang.org/x/crypto/ssh"
 

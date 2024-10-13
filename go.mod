@@ -1,4 +1,4 @@
-module github.com/Chara-X/ssh
+module github.com/Chara-X/tunnel
 
 go 1.23.1
 
