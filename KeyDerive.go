@@ -2,21 +2,17 @@ package tunnel
 
 import (
 	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/sha256"
-	"hash"
 )
 
-func KeyDerive(k, h []byte, d string) (cipher.Stream, hash.Hash) {
-	var iv, key, macKey = make([]byte, aes.BlockSize), make([]byte, 32), make([]byte, 32)
-	generateKey(k, h, d[0], iv)
-	generateKey(k, h, d[1], key)
-	generateKey(k, h, d[2], macKey)
-	var block, _ = aes.NewCipher(key)
-	return cipher.NewCTR(block, iv), hmac.New(sha256.New, macKey)
+func KeyDerive(k, h []byte, d string) (key []byte, iv []byte, macKey []byte) {
+	iv, key, macKey = make([]byte, aes.BlockSize), make([]byte, 32), make([]byte, 32)
+	generate(k, h, d[0], iv)
+	generate(k, h, d[1], key)
+	generate(k, h, d[2], macKey)
+	return
 }
-func generateKey(k, h []byte, d byte, out []byte) {
+func generate(k, h []byte, d byte, out []byte) {
 	var keySoFar []byte
 	var sha = sha256.New()
 	for len(out) > 0 {
@@ -37,7 +33,3 @@ func generateKey(k, h []byte, d byte, out []byte) {
 		}
 	}
 }
-
-type noneCipher struct{}
-
-func (c noneCipher) XORKeyStream(dst, src []byte) { copy(dst, src) }

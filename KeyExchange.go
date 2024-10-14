@@ -14,12 +14,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func KeyExchange(t *Conn, clientVersion, serverVersion, clientKexInit, serverKexInit []byte) (k, h []byte, hostKey ssh.PublicKey, sig *ssh.Signature) {
+func KeyExchange(t *Mux, clientVersion, serverVersion, clientKexInit, serverKexInit []byte) (k, h []byte) {
 	var ephKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	var kexReq = &msg.KexRequest{
 		PubKey: elliptic.Marshal(elliptic.P256(), ephKey.PublicKey.X, ephKey.PublicKey.Y),
 	}
-	var kexRep = t.exchange(kexReq).(*msg.KexReply)
+	t.Encode(kexReq)
+	var kexRep = t.Decode().(*msg.KexReply)
 	var x, y, _ = unmarshalECKey(elliptic.P256(), kexRep.PubKey)
 	var secret, _ = elliptic.P256().ScalarMult(x, y, ephKey.D.Bytes())
 	var sha = sha256.New()
@@ -33,10 +34,13 @@ func KeyExchange(t *Conn, clientVersion, serverVersion, clientKexInit, serverKex
 	k = make([]byte, intLength(secret))
 	marshalInt(k, secret)
 	sha.Write(k)
-	hostKey, _ = ssh.ParsePublicKey(kexRep.HostKey)
-	sig = &ssh.Signature{}
+	var hostKey, _ = ssh.ParsePublicKey(kexRep.HostKey)
+	var sig = &ssh.Signature{}
 	ssh.Unmarshal(kexRep.Signature, sig)
 	h = sha.Sum(nil)
+	if hostKey.Verify(h, sig) != nil {
+		panic("Server auth failed")
+	}
 	return
 }
 func marshalInt(to []byte, n *big.Int) []byte {
@@ -128,3 +132,7 @@ func validateECPublicKey(curve elliptic.Curve, x, y *big.Int) bool {
 	}
 	return true
 }
+
+type noneCipher struct{}
+
+func (c noneCipher) XORKeyStream(dst, src []byte) { copy(dst, src) }
