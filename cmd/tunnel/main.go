@@ -27,13 +27,13 @@ func main() {
 		}()
 		io.Copy(c, os.Stdin)
 	case tunnel.Direct:
-		var ln, _ = net.Listen("tcp", strings.Split(os.Args[4], ":")[0])
+		var ln, _ = net.Listen("tcp", os.Args[4])
 		defer ln.Close()
 		for {
 			var conn, _ = ln.Accept()
 			go func() {
 				defer conn.Close()
-				var ip, portString, _ = net.SplitHostPort(os.Args[4])
+				var ip, portString, _ = net.SplitHostPort(os.Args[5])
 				var port, _ = strconv.Atoi(portString)
 				var c = t.Open(&msg.ChannelOpen{ChanType: tunnel.Direct, WindowSize: 1024, MaxPacketSize: 1024, Payload: ssh.Marshal(struct {
 					RAddr string
