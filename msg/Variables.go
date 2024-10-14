@@ -7,6 +7,7 @@ var TypeMapper = map[byte]reflect.Type{
 	20: reflect.TypeFor[KexInit](),
 	21: reflect.TypeFor[Msg](),
 	31: reflect.TypeFor[KexReply](),
+	51: reflect.TypeFor[UserAuthFailure](),
 	52: reflect.TypeFor[Msg](),
 	53: reflect.TypeFor[UserAuthBanner](),
 	80: reflect.TypeFor[Request](),
@@ -14,5 +15,7 @@ var TypeMapper = map[byte]reflect.Type{
 	91: reflect.TypeFor[ChannelOpenConfirm](),
 	93: reflect.TypeFor[ChannelWindowAdjust](),
 	94: reflect.TypeFor[ChannelData](),
-	95: reflect.TypeFor[ChannelDataExtended](),
+	95: reflect.TypeFor[ChannelExtendedData](),
+	96: reflect.TypeFor[ChannelEOF](),
+	98: reflect.TypeFor[ChannelRequest](),
 }

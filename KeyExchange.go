@@ -14,7 +14,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func KeyExchange(t *Tunnel, clientVersion, serverVersion, clientKexInit, serverKexInit []byte) (k, h []byte, hostKey ssh.PublicKey, sig *ssh.Signature) {
+func KeyExchange(t *Conn, clientVersion, serverVersion, clientKexInit, serverKexInit []byte) (k, h []byte, hostKey ssh.PublicKey, sig *ssh.Signature) {
 	var ephKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	var kexReq = &msg.KexRequest{
 		PubKey: elliptic.Marshal(elliptic.P256(), ephKey.PublicKey.X, ephKey.PublicKey.Y),
