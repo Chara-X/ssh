@@ -8,9 +8,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	random "math/rand"
 	"net"
 	"os"
 	"reflect"
+	"strconv"
 	"sync"
 
 	"github.com/Chara-X/tunnel/msg"
@@ -19,21 +21,21 @@ import (
 
 type Tunnel struct {
 	conns          sync.Map
-	rState, wState ConnState
+	stateR, stateW ConnState
 	net.Conn
 	ClientVersion, ServerVersion []byte
 }
 
-func New(conn net.Conn, config *ssh.ClientConfig) *Tunnel {
-	var t = &Tunnel{rState: ConnState{Cipher: noneCipher{}}, wState: ConnState{Cipher: noneCipher{}}, Conn: conn, ClientVersion: []byte("SSH-2.0-Go")}
+func New(conn net.Conn, config *Config) *Tunnel {
+	var t = &Tunnel{stateR: ConnState{Cipher: noneCipher{}}, stateW: ConnState{Cipher: noneCipher{}}, Conn: conn, ClientVersion: []byte("SSH-2.0-Go")}
 	t.Write(append(t.ClientVersion, "\r\n"...))
 	var scanner = bufio.NewScanner(t)
 	scanner.Scan()
 	t.ServerVersion = scanner.Bytes()
 	// Algorithm negotiation
-	var algosReq = &msg.KexInit{KexAlgos: config.KeyExchanges, ServerHostKeyAlgos: config.HostKeyAlgorithms, CiphersClientServer: config.Ciphers, CiphersServerClient: config.Ciphers, MACsClientServer: config.MACs, MACsServerClient: config.MACs, CompressionClientServer: []string{"none"}, CompressionServerClient: []string{"none"}}
+	var algosReq = &msg.KexInit{KexAlgos: KeyExchanges, ServerHostKeyAlgos: HostKeyAlgorithms, CiphersClientServer: Ciphers, CiphersServerClient: Ciphers, MACsClientServer: MACs, MACsServerClient: MACs, CompressionClientServer: Compression, CompressionServerClient: Compression}
 	rand.Read(algosReq.Cookie[:])
-	var algosRep = t.Exchange(algosReq)
+	var algosRep = t.exchange(algosReq)
 	// Key exchange
 	var k, h, hostKey, sig = KeyExchange(t, t.ClientVersion, t.ServerVersion, ssh.Marshal(algosReq), ssh.Marshal(algosRep))
 	// Server authentication
@@ -41,16 +43,25 @@ func New(conn net.Conn, config *ssh.ClientConfig) *Tunnel {
 		panic(err)
 	}
 	// Connected
-	t.Exchange(&msg.Msg{SSHType: 21})
+	t.exchange(&msg.Msg{SSHType: 21})
 	// Key derivation
-	t.rState.Cipher, t.rState.Mac = KeyDerive(k, h, "BDF")
-	t.wState.Cipher, t.wState.Mac = KeyDerive(k, h, "ACE")
+	t.stateR.Cipher, t.stateR.Mac = KeyDerive(k, h, "BDF")
+	t.stateW.Cipher, t.stateW.Mac = KeyDerive(k, h, "ACE")
 	// Client authentication
-	if _, ok := t.Exchange(&msg.ServiceRequest{Service: "ssh-userauth"}).(*msg.ServiceAccept); !ok {
+	if _, ok := t.exchange(&msg.ServiceRequest{Service: "ssh-userauth"}).(*msg.ServiceAccept); !ok {
 		panic(fmt.Sprintln("Service request failed"))
 	}
-	if _, ok := t.Exchange(&msg.PasswordAuth{User: config.User, Service: "ssh-connection", Method: "password", Password: "123"}).(*msg.Msg); !ok {
-		panic(fmt.Sprintln("User auth failed"))
+	var authRep = t.exchange(&msg.PasswordAuth{User: config.User, Service: "ssh-connection", Method: "password", Password: config.Password})
+	switch authRep := authRep.(type) {
+	case *msg.UserAuthBanner:
+		log.Println(authRep.Message)
+		if t.Recv().(*msg.Msg).SSHType != 52 {
+			panic("User authentication failed")
+		}
+	case *msg.Msg:
+		if authRep.SSHType != 52 {
+			panic("User authentication failed")
+		}
 	}
 	go func() {
 		for {
@@ -70,41 +81,55 @@ func New(conn net.Conn, config *ssh.ClientConfig) *Tunnel {
 	}()
 	return t
 }
-func (t *Tunnel) Open(req *msg.ChannelOpen) *Conn {
-	var c = &Conn{tunnel: t, ch: make(chan interface{})}
-	c.pipeR, c.pipeW, _ = os.Pipe()
-	t.conns.Store(c.LocalID, c)
-	t.Send(req)
-	c.RemoteID = (<-c.ch).(*msg.ChannelOpenConfirm).LocalID
-	if req.ChanType == "session" {
-		t.Send(&msg.ChannelRequest{PeersID: c.RemoteID, Request: "shell"})
-	}
+func (t *Tunnel) Shell() *Conn {
+	var c = t.Open("session", nil)
+	c.Send("shell", nil)
 	return c
 }
-func (t *Tunnel) Exchange(req interface{}) interface{} {
-	t.Send(req)
-	return t.Recv()
+func (t *Tunnel) Dial(addr string) *Conn {
+	var ip, portString, _ = net.SplitHostPort(addr)
+	var port, _ = strconv.Atoi(portString)
+	var c = t.Open("direct-tcpip", ssh.Marshal(struct {
+		RAddr string
+		RPort uint32
+		LAddr string
+		LPort uint32
+	}{
+		RAddr: ip,
+		RPort: uint32(port),
+		LAddr: "0.0.0.0",
+		LPort: 0,
+	}))
+	return c
 }
-func (s *Tunnel) Recv() interface{} {
+func (t *Tunnel) Open(name string, data []byte) *Conn {
+	var c = &Conn{tunnel: t, ch: make(chan interface{}), LocalID: random.Uint32()}
+	c.pipeR, c.pipeW, _ = os.Pipe()
+	t.conns.Store(c.LocalID, c)
+	t.Send(&msg.ChannelOpen{ChanType: name, LocalID: c.LocalID, LocalWindow: 1024, MaxPacketSize: 1024, TypeSpecificData: data})
+	c.RemoteID = c.Recv().(*msg.ChannelOpenConfirm).LocalID
+	return c
+}
+func (t *Tunnel) Recv() interface{} {
 	var header = make([]byte, 5)
-	s.Read(header)
-	s.rState.Cipher.XORKeyStream(header, header)
+	t.Read(header)
+	t.stateR.Cipher.XORKeyStream(header, header)
 	var length, paddingLength = binary.BigEndian.Uint32(header[0:4]), uint32(header[4])
 	var body = make([]byte, length-1)
-	s.Read(body)
-	s.rState.Cipher.XORKeyStream(body, body)
-	if s.rState.Mac != nil {
-		var mac = make([]byte, s.rState.Mac.Size())
-		s.Read(mac)
-		s.rState.Mac.Reset()
-		binary.Write(s.rState.Mac, binary.BigEndian, s.rState.SeqNum)
-		s.rState.Mac.Write(header)
-		s.rState.Mac.Write(body)
-		if subtle.ConstantTimeCompare(s.rState.Mac.Sum(nil), mac) != 1 {
+	t.Read(body)
+	t.stateR.Cipher.XORKeyStream(body, body)
+	if t.stateR.Mac != nil {
+		var mac = make([]byte, t.stateR.Mac.Size())
+		t.Read(mac)
+		t.stateR.Mac.Reset()
+		binary.Write(t.stateR.Mac, binary.BigEndian, t.stateR.SeqNum)
+		t.stateR.Mac.Write(header)
+		t.stateR.Mac.Write(body)
+		if subtle.ConstantTimeCompare(t.stateR.Mac.Sum(nil), mac) != 1 {
 			panic("ssh: MAC failure")
 		}
 	}
-	s.rState.SeqNum++
+	t.stateR.SeqNum++
 	var payload = body[:length-paddingLength-1]
 	var rep = reflect.New(msg.TypeMapper[payload[0]]).Interface()
 	if err := ssh.Unmarshal(payload, rep); err != nil {
@@ -112,7 +137,7 @@ func (s *Tunnel) Recv() interface{} {
 	}
 	return rep
 }
-func (s *Tunnel) Send(req interface{}) {
+func (t *Tunnel) Send(req interface{}) {
 	var payload = ssh.Marshal(req)
 	var paddingLength = aes.BlockSize - (5+len(payload))%aes.BlockSize
 	if paddingLength < 4 {
@@ -124,23 +149,27 @@ func (s *Tunnel) Send(req interface{}) {
 	header[4] = byte(paddingLength)
 	var padding = make([]byte, paddingLength)
 	rand.Reader.Read(padding)
-	if s.wState.Mac != nil {
-		s.wState.Mac.Reset()
-		binary.Write(s.wState.Mac, binary.BigEndian, s.wState.SeqNum)
-		s.wState.Mac.Write(header)
-		s.wState.Mac.Write(payload)
-		s.wState.Mac.Write(padding)
+	if t.stateW.Mac != nil {
+		t.stateW.Mac.Reset()
+		binary.Write(t.stateW.Mac, binary.BigEndian, t.stateW.SeqNum)
+		t.stateW.Mac.Write(header)
+		t.stateW.Mac.Write(payload)
+		t.stateW.Mac.Write(padding)
 	}
-	s.wState.Cipher.XORKeyStream(header, header)
-	s.wState.Cipher.XORKeyStream(payload, payload)
-	s.wState.Cipher.XORKeyStream(padding, padding)
-	s.Write(header)
-	s.Write(payload)
-	s.Write(padding)
-	if s.wState.Mac != nil {
-		s.Write(s.wState.Mac.Sum(nil))
+	t.stateW.Cipher.XORKeyStream(header, header)
+	t.stateW.Cipher.XORKeyStream(payload, payload)
+	t.stateW.Cipher.XORKeyStream(padding, padding)
+	t.Write(header)
+	t.Write(payload)
+	t.Write(padding)
+	if t.stateW.Mac != nil {
+		t.Write(t.stateW.Mac.Sum(nil))
 	}
-	s.wState.SeqNum++
+	t.stateW.SeqNum++
+}
+func (t *Tunnel) exchange(req interface{}) interface{} {
+	t.Send(req)
+	return t.Recv()
 }
 
 //	func (t *Tunnel) Shell() *Conn {

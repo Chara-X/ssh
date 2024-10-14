@@ -8,6 +8,7 @@ var TypeMapper = map[byte]reflect.Type{
 	21: reflect.TypeFor[Msg](),
 	31: reflect.TypeFor[KexReply](),
 	52: reflect.TypeFor[Msg](),
+	53: reflect.TypeFor[UserAuthBanner](),
 	80: reflect.TypeFor[Request](),
 	90: reflect.TypeFor[ChannelOpen](),
 	91: reflect.TypeFor[ChannelOpenConfirm](),

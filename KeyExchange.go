@@ -19,7 +19,7 @@ func KeyExchange(t *Tunnel, clientVersion, serverVersion, clientKexInit, serverK
 	var kexReq = &msg.KexRequest{
 		PubKey: elliptic.Marshal(elliptic.P256(), ephKey.PublicKey.X, ephKey.PublicKey.Y),
 	}
-	var kexRep = t.Exchange(kexReq).(*msg.KexReply)
+	var kexRep = t.exchange(kexReq).(*msg.KexReply)
 	var x, y, _ = unmarshalECKey(elliptic.P256(), kexRep.PubKey)
 	var secret, _ = elliptic.P256().ScalarMult(x, y, ephKey.D.Bytes())
 	var sha = sha256.New()
