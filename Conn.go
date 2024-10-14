@@ -19,7 +19,7 @@ func (c *Conn) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 func (c *Conn) Close() {
-	c.t.conns.Delete(c.Src)
+	c.t.cs.Delete(c.Src)
 	c.pipeR.Close()
 	close(c.ch)
 }

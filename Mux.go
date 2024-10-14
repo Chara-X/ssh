@@ -14,7 +14,7 @@ import (
 )
 
 type Mux struct {
-	conns sync.Map
+	cs sync.Map
 	*Encoder
 	*Decoder
 }
@@ -40,11 +40,11 @@ func New(conn net.Conn, config *Config) *Mux {
 		for {
 			switch rep := t.Decode().(type) {
 			case *msg.ChannelOpenConfirm:
-				var v, _ = t.conns.Load(rep.Dst)
+				var v, _ = t.cs.Load(rep.Dst)
 				var ch = v.(*Conn)
 				ch.ch <- rep
 			case *msg.ChannelData:
-				var v, _ = t.conns.Load(rep.RemoteID)
+				var v, _ = t.cs.Load(rep.RemoteID)
 				var ch = v.(*Conn)
 				ch.pipeW.Write([]byte(rep.Data))
 			default:
@@ -57,7 +57,7 @@ func New(conn net.Conn, config *Config) *Mux {
 func (t *Mux) Open(req *msg.ChannelOpen) *Conn {
 	var c = &Conn{ch: make(chan interface{}, 1024), t: t, Src: req.Src}
 	c.pipeR, c.pipeW, _ = os.Pipe()
-	t.conns.Store(c.Src, c)
+	t.cs.Store(c.Src, c)
 	t.Encode(req)
 	c.Dst = (<-c.ch).(*msg.ChannelOpenConfirm).Src
 	if req.ChanType == Session {
