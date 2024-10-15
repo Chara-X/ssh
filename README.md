@@ -3,10 +3,6 @@
 ## Example
 
 ```go
-var config = &tunnel.Config{
-	User:     "root",
-	Password: "123",
-}
 func ExampleShell() {
 	var conn, _ = net.Dial("tcp", "192.168.58.2:30631")
 	defer conn.Close()
