@@ -1,5 +1,12 @@
 # tunnel
 
+## Command
+
+```sh
+tunnel 196.128.0.1 root:123 shell
+tunnel 196.128.0.1 root:123 forward 8080 127.0.0.1:80
+```
+
 ## Example
 
 ```go

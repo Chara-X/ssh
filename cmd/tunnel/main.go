@@ -12,8 +12,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// tunnel 196.128.0.1 root:123 shell
-// tunnel 196.128.0.1 root:123 forward 8080 127.0.0.1:80
 func main() {
 	var conn, _ = net.Dial("tcp", os.Args[1])
 	defer conn.Close()
