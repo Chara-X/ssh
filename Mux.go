@@ -41,12 +41,12 @@ func New(conn net.Conn, config *Config) *Mux {
 			switch rep := t.Decode().(type) {
 			case *msg.ChannelOpenConfirm:
 				var v, _ = t.cs.Load(rep.Dst)
-				var ch = v.(*Conn)
-				ch.ch <- rep
+				var c = v.(*Conn)
+				c.ch <- rep
 			case *msg.ChannelData:
 				var v, _ = t.cs.Load(rep.RemoteID)
-				var ch = v.(*Conn)
-				ch.pipeW.Write([]byte(rep.Data))
+				var c = v.(*Conn)
+				c.pipeW.Write([]byte(rep.Data))
 			default:
 				log.Println("Unhandled SSH type:", reflect.TypeOf(rep))
 			}
